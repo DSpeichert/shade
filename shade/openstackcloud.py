@@ -2070,10 +2070,55 @@ class OpenStackCloud(
         params = filters or {}
         if all_projects:
             params['all_tenants'] = True
-        data = self._compute_client.get(
-            '/servers/detail', params=params, error_message=error_msg)
-        servers = self._normalize_servers(
-            self._get_and_munchify('servers', data))
+
+        """List all available servers.
+
+        :returns: A list of volume ``munch.Munch``.
+
+        """
+        def _list(data):
+            servers.extend(data.get('servers', []))
+            endpoint = None
+            for l in data.get('servers_links', []):
+                if 'rel' in l and 'next' == l['rel']:
+                    endpoint = l['href']
+                    break
+            if endpoint:
+                try:
+                    _list(self._compute_client.get(endpoint))
+                except OpenStackCloudURINotFound:
+                    # Catch and re-raise here because we are making recursive
+                    # calls and we just have context for the log here
+                    self.log.debug(
+                        "While listing servers, could not find next link"
+                        " {link}.".format(link=data))
+                    raise
+
+        # Fetching paginated volumes can fails for several reasons, if
+        # something goes wrong we'll have to start fetching volumes from
+        # scratch
+        attempts = 5
+        servers = []
+        for _ in range(attempts):
+            data = self._compute_client.get(
+                '/servers/detail', params=params, error_message=error_msg)
+            if 'servers_links' not in data:
+                # no pagination needed
+                servers.extend(data.get('servers', []))
+                break
+
+            try:
+                _list(data)
+                break
+            except OpenStackCloudURINotFound:
+                pass
+        else:
+            self.log.debug(
+                "List servers failed to retrieve all volumes after"
+                " {attempts} attempts. Returning what we found.".format(
+                    attempts=attempts))
+
+        servers = self._normalize_servers(self._get_and_munchify(key=None, data=servers))
         return [
             self._expand_server(server, detailed, bare)
             for server in servers
